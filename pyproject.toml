@@ -1,0 +1,10 @@
+[project]
+name = "claude-code-notify"
+version = "0.1.0"
+description = "Claude Code의 이벤트를 Slack Message로 사용자에게 알려줍니다."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "python-dotenv>=1.2.2",
+    "requests>=2.32.5",
+]
