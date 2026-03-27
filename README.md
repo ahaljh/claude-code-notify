@@ -33,8 +33,10 @@ Claude Code의 [훅(Hooks)](https://docs.anthropic.com/en/docs/claude-code/hooks
 uv tool install git+https://github.com/ahaljh/claude-code-notify
 
 # 2. 초기 설정 (Slack 토큰 입력 + Claude Code 훅 자동 등록)
-claude-code-notify init
+uvx claude-code-notify init
 ```
+
+> **참고**: `uv tool install` 후 PATH 설정 없이도 `uvx` 명령어로 바로 실행할 수 있습니다.
 
 `init` 명령어가 다음을 자동으로 처리합니다:
 - Slack Bot Token과 User ID 입력 안내

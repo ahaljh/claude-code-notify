@@ -129,6 +129,18 @@ def _send_test_notification(token: str, user_id: str) -> None:
 
 def cmd_init(_args: argparse.Namespace) -> None:
     """인터랙티브 초기 설정"""
+    # 설치 여부 확인 (uvx로만 실행한 경우 hooks가 동작하지 않음)
+    cmd_path = _resolve_command_path()
+    if cmd_path == "claude-code-notify":
+        print(
+            "⚠️  claude-code-notify가 설치되지 않았습니다.\n"
+            "먼저 설치한 후 다시 실행해주세요:\n\n"
+            "  uv tool install git+https://github.com/ahaljh/claude-code-notify\n"
+            "  uvx claude-code-notify init\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     print("claude-code-notify 초기 설정을 시작합니다.\n")
 
     # 기존 설정 확인
