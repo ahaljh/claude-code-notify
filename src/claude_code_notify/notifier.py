@@ -1,16 +1,17 @@
-#!/usr/bin/env python3
-# slack_notifier.py — Claude Code 훅에서 호출되어 Slack DM으로 알림을 보내는 스크립트
+# notifier.py — Claude Code 훅에서 호출되어 Slack DM으로 알림을 보내는 모듈
 
+import json
+import logging
+import logging.handlers
 import os
 import sys
-import json
-import argparse
-import logging
 from datetime import datetime
 from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
+
+from claude_code_notify.config import get_config_path, get_log_path
 
 # 상수
 API_URL = "https://slack.com/api/chat.postMessage"
@@ -31,15 +32,25 @@ def setup() -> None:
     """환경변수 로딩 및 로깅 설정"""
     global SLACK_BOT_TOKEN, USER_ID
 
-    load_dotenv()
+    # 설정 파일 로드 (XDG 경로 우선, fallback으로 현재 디렉토리 .env)
+    config_path = get_config_path()
+    if config_path.exists():
+        load_dotenv(config_path)
+    else:
+        load_dotenv()
 
     log_level = os.getenv("LOG_LEVEL", "DEBUG").upper()
-    log_file = os.path.join(os.path.dirname(__file__), "slack_notifier.log")
+    log_path = get_log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # 로그 로테이션: 최대 1MB, 백업 3개 (총 ~4MB)
+    handler = logging.handlers.RotatingFileHandler(
+        str(log_path), maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+    )
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     logging.basicConfig(
-        filename=log_file,
         level=getattr(logging, log_level, logging.DEBUG),
-        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[handler],
     )
 
     SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
@@ -68,7 +79,7 @@ def parse_stdin() -> dict:
         stdin_data = sys.stdin.read()
         logger.debug("Raw stdin data: %s", stdin_data)
         return json.loads(stdin_data) if stdin_data.strip() else {}
-    except Exception as e:
+    except json.JSONDecodeError as e:
         logger.exception("Failed to parse stdin JSON: %s", e)
         return {}
 
@@ -176,7 +187,7 @@ def send_slack_notification(status: str) -> None:
     """메인 알림 함수: stdin 파싱 → 메시지 구성 → Slack 전송"""
     logger.info("send_slack_notification called with status=%s", status)
 
-    # 환경변수 검증 (가장 먼저 수행)
+    # 환경변수 검증
     if not SLACK_BOT_TOKEN or not USER_ID:
         logger.error(
             "Missing required environment variables. SLACK_BOT_TOKEN set: %s, USER_ID: %s",
@@ -204,13 +215,3 @@ def send_slack_notification(status: str) -> None:
 
     slack_data = build_slack_payload(status, payload)
     send_to_slack(slack_data)
-
-
-if __name__ == "__main__":
-    setup()
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("status", choices=[STATUS_WAIT, "done"])
-    args = parser.parse_args()
-
-    send_slack_notification(args.status)
