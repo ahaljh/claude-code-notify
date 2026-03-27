@@ -155,6 +155,7 @@ def cmd_init(_args: argparse.Namespace) -> None:
     while True:
         token = getpass("SLACK_BOT_TOKEN을 입력하세요 (xoxb-...): ")
         if token.startswith("xoxb-"):
+            print(f"  ✓ 토큰 입력 완료 ({token[:8]}...{token[-4:]})")
             break
         print("  올바른 Bot Token을 입력해주세요 (xoxb-로 시작해야 합니다).")
 
