@@ -1,37 +1,53 @@
-# notifier.py — Claude Code 훅에서 호출되어 Slack DM으로 알림을 보내는 모듈
+# notifier.py — Claude Code 훅에서 호출되는 provider 중립 알림 로직 (파싱/컨텍스트 구성/디스패치)
 
 import json
 import logging
 import logging.handlers
 import os
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-import requests
 from dotenv import load_dotenv
 
+from claude_code_notify import discord, slack
 from claude_code_notify.config import get_config_path, get_log_path
 
 # 상수
-API_URL = "https://slack.com/api/chat.postMessage"
 DEFAULT_VALUE = "N/A"
 STATUS_WAIT = "wait"
-COLOR_WARNING = "#FFA500"
-COLOR_SUCCESS = "#36A64F"
 MAX_MESSAGE_LENGTH = 300
 MAX_PREVIEW_LENGTH = 100
 
+# 지원하는 알림 provider (모듈 = provider 덕 타이핑)
+# 각 모듈은 is_configured / build_payload / send / prompt_config 함수를 제공한다
+PROVIDERS = {"slack": slack, "discord": discord}
+
+# provider가 참조하는 설정 키
+CONFIG_KEYS = ["SLACK_BOT_TOKEN", "USER_ID", "DISCORD_WEBHOOK_URL"]
+
 # 모듈 레벨 설정 (setup()에서 초기화)
 logger = logging.getLogger(__name__)
-SLACK_BOT_TOKEN: str | None = None
-USER_ID: str | None = None
+CONFIG: dict[str, str] = {}
+
+
+@dataclass
+class NotificationContext:
+    """provider 중립 알림 컨텍스트 (각 provider가 자기 포맷으로 변환)"""
+
+    status: str                     # "wait" | "done"
+    header: str                     # 이모지 포함 제목
+    message: str                    # 본문 (truncate 적용됨)
+    preview: str                    # 푸시 알림 미리보기 텍스트
+    fields: list[tuple[str, str]]   # (이름, 값) 쌍 목록
+    session_id: str
+    transcript_path: str
+    timestamp: datetime
 
 
 def setup() -> None:
     """환경변수 로딩 및 로깅 설정"""
-    global SLACK_BOT_TOKEN, USER_ID
-
     # 설정 파일 로드 (XDG 경로 우선, fallback으로 현재 디렉토리 .env)
     config_path = get_config_path()
     if config_path.exists():
@@ -53,13 +69,15 @@ def setup() -> None:
         handlers=[handler],
     )
 
-    SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
-    USER_ID = os.getenv("USER_ID")
+    CONFIG.clear()
+    for key in CONFIG_KEYS:
+        value = os.getenv(key)
+        if value:
+            CONFIG[key] = value
 
     logger.debug(
-        "Environment loaded. SLACK_BOT_TOKEN set: %s, USER_ID: %s",
-        bool(SLACK_BOT_TOKEN),
-        USER_ID,
+        "Environment loaded. Configured keys: %s",
+        [key for key in CONFIG_KEYS if key in CONFIG],
     )
 
 
@@ -84,117 +102,86 @@ def parse_stdin() -> dict:
         return {}
 
 
-def build_slack_payload(status: str, payload: dict) -> dict:
-    """상태와 payload를 기반으로 Slack Block Kit 메시지를 구성"""
+def build_context(status: str, payload: dict) -> NotificationContext:
+    """상태와 훅 payload를 provider 중립 컨텍스트로 변환"""
     event_name = payload.get("hook_event_name", DEFAULT_VALUE)
     session_id = payload.get("session_id", DEFAULT_VALUE)
     cwd = to_relative_path(payload.get("cwd", DEFAULT_VALUE))
     transcript_path = to_relative_path(payload.get("transcript_path", DEFAULT_VALUE))
     notification_type = payload.get("notification_type", DEFAULT_VALUE)
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     project_name = cwd.rsplit("/", 1)[-1] if cwd != DEFAULT_VALUE else ""
 
-    # 상태별 UI 테마 및 필드 구성
+    # 상태별 제목/본문/필드 구성
     if status == STATUS_WAIT:
-        header_text = f"🚨 Claude Code [{project_name}]: 입력 대기 중"
-        color = COLOR_WARNING
+        header = f"🚨 Claude Code [{project_name}]: 입력 대기 중"
         msg = payload.get("message", "권한 승인이나 프롬프트 입력이 필요합니다.")
         fields = [
-            {"type": "mrkdwn", "text": f"*이벤트 타입:*\n{event_name}"},
-            {"type": "mrkdwn", "text": f"*알림 유형:*\n{notification_type}"},
-            {"type": "mrkdwn", "text": f"*작업 경로:*\n`{cwd}`"},
+            ("이벤트 타입", event_name),
+            ("알림 유형", notification_type),
+            ("작업 경로", f"`{cwd}`"),
         ]
     else:
-        header_text = f"✅ Claude Code [{project_name}]: 작업 완료"
-        color = COLOR_SUCCESS
+        header = f"✅ Claude Code [{project_name}]: 작업 완료"
         last_message = payload.get("last_assistant_message", "")
         if len(last_message) > MAX_MESSAGE_LENGTH:
             last_message = last_message[:MAX_MESSAGE_LENGTH] + "..."
         msg = last_message or "작업이 완료되었습니다."
         permission_mode = payload.get("permission_mode", DEFAULT_VALUE)
         fields = [
-            {"type": "mrkdwn", "text": f"*이벤트 타입:*\n{event_name}"},
-            {"type": "mrkdwn", "text": f"*작업 경로:*\n`{cwd}`"},
-            {"type": "mrkdwn", "text": f"*권한 모드:*\n{permission_mode}"},
+            ("이벤트 타입", event_name),
+            ("작업 경로", f"`{cwd}`"),
+            ("권한 모드", permission_mode),
         ]
 
     # 푸시 알림 미리보기 텍스트
     preview_msg = msg[:MAX_PREVIEW_LENGTH] + "..." if len(msg) > MAX_PREVIEW_LENGTH else msg
     status_emoji = "🚨" if status == STATUS_WAIT else "✅"
     status_label = "입력 대기 중" if status == STATUS_WAIT else "작업 완료"
-    preview_text = f"*{status_emoji} [{project_name}] {status_label}*\n{preview_msg}"
+    preview = f"*{status_emoji} [{project_name}] {status_label}*\n{preview_msg}"
 
-    return {
-        "channel": USER_ID,
-        "text": preview_text,
-        "attachments": [
-            {
-                "color": color,
-                "blocks": [
-                    {
-                        "type": "header",
-                        "text": {"type": "plain_text", "text": header_text, "emoji": True},
-                    },
-                    {"type": "section", "text": {"type": "mrkdwn", "text": f"*{msg}*"}},
-                    {"type": "section", "fields": fields},
-                    {"type": "divider"},
-                    {
-                        "type": "context",
-                        "elements": [
-                            {
-                                "type": "mrkdwn",
-                                "text": f"🕒 {current_time} | 🔑 세션: {session_id}\n📝 `{transcript_path}`",
-                            }
-                        ],
-                    },
-                ],
-            }
-        ],
-    }
+    return NotificationContext(
+        status=status,
+        header=header,
+        message=msg,
+        preview=preview,
+        fields=fields,
+        session_id=session_id,
+        transcript_path=transcript_path,
+        timestamp=datetime.now(),
+    )
 
 
-def send_to_slack(slack_data: dict) -> None:
-    """Slack API로 메시지를 전송"""
-    headers = {
-        "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
-        "Content-Type": "application/json",
-    }
-
-    logger.debug("Slack payload to send: %s", json.dumps(slack_data, ensure_ascii=False))
-
-    try:
-        response = requests.post(API_URL, headers=headers, json=slack_data, timeout=5)
-        logger.info("Slack API response status: %s", response.status_code)
-        logger.debug("Slack API raw response: %s", response.text)
-
-        response.raise_for_status()
-
-        result = response.json()
-        if not result.get("ok"):
-            error_msg = result.get("error")
-            logger.error("Slack API logical error: %s", error_msg)
-            print(f"Slack API Error: {error_msg}", file=sys.stderr)
-        else:
-            logger.info("Slack API call succeeded: ts=%s, channel=%s", result.get("ts"), result.get("channel"))
-
-    except requests.exceptions.RequestException as e:
-        logger.exception("Request to Slack failed: %s", e)
-        print(f"Request Error: {e}", file=sys.stderr)
+def build_test_context() -> NotificationContext:
+    """init 테스트 알림용 컨텍스트"""
+    return NotificationContext(
+        status="done",
+        header="🎉 claude-code-notify 설정 완료",
+        message="알림이 정상적으로 동작합니다.",
+        preview="🎉 claude-code-notify 설정 완료! 알림이 정상적으로 동작합니다.",
+        fields=[],
+        session_id=DEFAULT_VALUE,
+        transcript_path=DEFAULT_VALUE,
+        timestamp=datetime.now(),
+    )
 
 
-def send_slack_notification(status: str) -> None:
-    """메인 알림 함수: stdin 파싱 → 메시지 구성 → Slack 전송"""
-    logger.info("send_slack_notification called with status=%s", status)
+def active_providers(config: dict) -> list[str]:
+    """설정 키가 존재하는 활성 provider 이름 목록"""
+    return [name for name, module in PROVIDERS.items() if module.is_configured(config)]
 
-    # 환경변수 검증
-    if not SLACK_BOT_TOKEN or not USER_ID:
-        logger.error(
-            "Missing required environment variables. SLACK_BOT_TOKEN set: %s, USER_ID: %s",
-            bool(SLACK_BOT_TOKEN),
-            USER_ID,
+
+def send_notification(status: str) -> None:
+    """메인 알림 함수: stdin 파싱 → 컨텍스트 구성 → 활성 provider 전부에 전송"""
+    logger.info("send_notification called with status=%s", status)
+
+    active = active_providers(CONFIG)
+    if not active:
+        logger.error("No notification provider configured. Keys checked: %s", CONFIG_KEYS)
+        print(
+            "설정된 알림 provider가 없습니다. `claude-code-notify init`을 실행해주세요.",
+            file=sys.stderr,
         )
-        print("Missing SLACK_BOT_TOKEN or USER_ID", file=sys.stderr)
         return
 
     payload = parse_stdin()
@@ -207,11 +194,13 @@ def send_slack_notification(status: str) -> None:
 
     logger.debug("Parsed payload: %s", json.dumps(payload, indent=2, ensure_ascii=False))
     logger.info(
-        "Notification context - event_name=%s, session_id=%s, cwd=%s",
+        "Notification context - event_name=%s, session_id=%s, cwd=%s, providers=%s",
         payload.get("hook_event_name", DEFAULT_VALUE),
         payload.get("session_id", DEFAULT_VALUE),
         payload.get("cwd", DEFAULT_VALUE),
+        active,
     )
 
-    slack_data = build_slack_payload(status, payload)
-    send_to_slack(slack_data)
+    ctx = build_context(status, payload)
+    for name in active:
+        PROVIDERS[name].send(ctx, CONFIG)

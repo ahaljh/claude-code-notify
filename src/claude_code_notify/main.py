@@ -4,17 +4,33 @@ import argparse
 import json
 import shutil
 import sys
-from getpass import getpass
 from pathlib import Path
+
+from dotenv import dotenv_values
 
 from claude_code_notify.config import (
     get_claude_settings_path,
     get_config_dir,
     get_config_path,
 )
-from claude_code_notify.notifier import API_URL, STATUS_WAIT, send_slack_notification, setup
+from claude_code_notify.notifier import (
+    PROVIDERS,
+    STATUS_WAIT,
+    active_providers,
+    build_test_context,
+    send_notification,
+    setup,
+)
 
 HOOK_MARKER = "claude-code-notify"
+
+PROVIDER_LABELS = {"slack": "Slack", "discord": "Discord"}
+
+# provider별 전용 설정 키 (선택 해제 시 제거 대상)
+PROVIDER_KEYS = {
+    "slack": {"SLACK_BOT_TOKEN", "USER_ID"},
+    "discord": {"DISCORD_WEBHOOK_URL"},
+}
 
 
 def _resolve_command_path() -> str:
@@ -82,49 +98,47 @@ def _register_hooks() -> None:
     print(f"  훅 등록 완료: {settings_path}")
 
 
-def _save_config(token: str, user_id: str) -> None:
+def _save_config(values: dict[str, str]) -> None:
     """설정 파일에 환경변수 저장"""
     config_dir = get_config_dir()
     config_dir.mkdir(parents=True, exist_ok=True)
 
     config_path = get_config_path()
-    config_path.write_text(
-        f"SLACK_BOT_TOKEN={token}\n"
-        f"USER_ID={user_id}\n"
-        f"LOG_LEVEL=INFO\n",
-        encoding="utf-8",
-    )
+    lines = "".join(f"{key}={value}\n" for key, value in values.items())
+    config_path.write_text(lines, encoding="utf-8")
     # 본인만 읽기/쓰기 가능하도록 권한 설정
     config_path.chmod(0o600)
     print(f"  설정 저장 완료: {config_path}")
 
 
-def _send_test_notification(token: str, user_id: str) -> None:
-    """테스트 알림 전송"""
-    import requests
+def _prompt_providers(existing: dict) -> list[str]:
+    """알림을 보낼 provider 선택 UI"""
+    configured = active_providers(existing)
+    if configured:
+        labels = ", ".join(PROVIDER_LABELS[name] for name in configured)
+        print(f"현재 설정된 서비스: {labels}\n")
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "channel": user_id,
-        "text": "🎉 claude-code-notify 설정 완료! 알림이 정상적으로 동작합니다.",
-    }
-    try:
-        resp = requests.post(
-            API_URL,
-            headers=headers,
-            json=payload,
-            timeout=5,
-        )
-        result = resp.json()
-        if result.get("ok"):
-            print("  테스트 알림 전송 성공!")
+    while True:
+        choice = input("알림을 보낼 서비스를 선택하세요 (1) Slack  2) Discord  3) 둘 다): ")
+        if choice == "1":
+            return ["slack"]
+        if choice == "2":
+            return ["discord"]
+        if choice == "3":
+            return ["slack", "discord"]
+        print("  1, 2, 3 중 하나를 입력해주세요.")
+
+
+def _send_test_notification(selected: list[str], config: dict) -> None:
+    """선택된 provider 각각에 테스트 알림 전송"""
+    ctx = build_test_context()
+    for name in selected:
+        ok = PROVIDERS[name].send(ctx, config)
+        label = PROVIDER_LABELS[name]
+        if ok:
+            print(f"  [{label}] 테스트 알림 전송 성공!")
         else:
-            print(f"  테스트 알림 실패: {result.get('error')}", file=sys.stderr)
-    except Exception as e:
-        print(f"  테스트 알림 실패: {e}", file=sys.stderr)
+            print(f"  [{label}] 테스트 알림 실패", file=sys.stderr)
 
 
 def cmd_init(_args: argparse.Namespace) -> None:
@@ -143,32 +157,40 @@ def cmd_init(_args: argparse.Namespace) -> None:
 
     print("claude-code-notify 초기 설정을 시작합니다.\n")
 
-    # 기존 설정 확인
+    # 기존 설정 로드 (키별 병합을 위해 전체 읽기, None 값은 제외)
     config_path = get_config_path()
+    existing: dict[str, str] = {}
     if config_path.exists():
-        overwrite = input(f"기존 설정이 있습니다 ({config_path}). 덮어쓸까요? (y/N): ")
-        if overwrite.lower() != "y":
-            print("설정을 유지합니다.")
-            return
+        existing = {
+            key: value
+            for key, value in dotenv_values(config_path).items()
+            if value is not None
+        }
 
-    # SLACK_BOT_TOKEN 입력
-    while True:
-        token = getpass("SLACK_BOT_TOKEN을 입력하세요 (xoxb-...): ")
-        if token.startswith("xoxb-"):
-            print(f"  ✓ 토큰 입력 완료 ({token[:8]}...{token[-4:]})")
-            break
-        print("  올바른 Bot Token을 입력해주세요 (xoxb-로 시작해야 합니다).")
+    # provider 선택 및 provider별 설정 입력
+    selected = _prompt_providers(existing)
+    merged = dict(existing)
+    for name in selected:
+        merged.update(PROVIDERS[name].prompt_config(existing))
 
-    # USER_ID 입력
-    while True:
-        user_id = input("USER_ID를 입력하세요 (Slack 프로필 > 멤버 ID 복사, U로 시작): ")
-        if user_id.startswith("U"):
-            break
-        print("  올바른 User ID를 입력해주세요 (U로 시작해야 합니다).")
+    # 선택하지 않은 provider의 기존 설정 처리
+    for name, module in PROVIDERS.items():
+        if name in selected or not module.is_configured(existing):
+            continue
+        label = PROVIDER_LABELS[name]
+        remove = input(f"\n기존 {label} 설정이 있습니다. 제거할까요? (y/N): ")
+        if remove.lower() == "y":
+            for key in PROVIDER_KEYS[name]:
+                merged.pop(key, None)
+            print(f"  {label} 설정 제거 완료")
+        else:
+            print(f"  {label} 설정 유지 (계속 알림이 전송됩니다)")
+
+    merged.setdefault("LOG_LEVEL", "INFO")
 
     # 설정 저장
     print()
-    _save_config(token, user_id)
+    _save_config(merged)
 
     # Claude Code 훅 등록
     _register_hooks()
@@ -177,7 +199,7 @@ def cmd_init(_args: argparse.Namespace) -> None:
     print()
     test = input("테스트 알림을 보낼까요? (Y/n): ")
     if test.lower() != "n":
-        _send_test_notification(token, user_id)
+        _send_test_notification(selected, merged)
 
     print("\n설정 완료! Claude Code를 재시작하면 알림이 동작합니다.")
 
@@ -185,19 +207,19 @@ def cmd_init(_args: argparse.Namespace) -> None:
 def cmd_notify(args: argparse.Namespace) -> None:
     """알림 전송 (Claude Code 훅에서 호출)"""
     setup()
-    send_slack_notification(args.status)
+    send_notification(args.status)
 
 
 def cli() -> None:
     """CLI 진입점"""
     parser = argparse.ArgumentParser(
         prog="claude-code-notify",
-        description="Claude Code 작업 상태를 Slack DM으로 알림",
+        description="Claude Code 작업 상태를 Slack/Discord로 알림",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # init 서브커맨드
-    init_parser = subparsers.add_parser("init", help="초기 설정 (Slack 토큰 + 훅 등록)")
+    init_parser = subparsers.add_parser("init", help="초기 설정 (알림 서비스 선택 + 훅 등록)")
     init_parser.set_defaults(func=cmd_init)
 
     # notify 서브커맨드
