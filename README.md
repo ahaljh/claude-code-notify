@@ -1,6 +1,6 @@
 # claude-code-notify
 
-Claude Code 작업 완료 또는 입력 대기 시 Slack DM으로 알림을 보내는 유틸리티.
+Claude Code 작업 완료 또는 입력 대기 시 Slack/Discord로 알림을 보내는 유틸리티.
 
 Claude Code의 [훅(Hooks)](https://docs.anthropic.com/en/docs/claude-code/hooks) 기능과 연동하여, 터미널을 보고 있지 않아도 작업 상태를 실시간으로 확인할 수 있습니다.
 
@@ -13,11 +13,20 @@ Claude Code의 [훅(Hooks)](https://docs.anthropic.com/en/docs/claude-code/hooks
 
 > **참고**: `idle_prompt` 타입 알림(사용자 미응답 시 발생하는 중복 알림)은 자동으로 필터링됩니다.
 
+## 지원 서비스
+
+| 서비스 | 방식 | 필요한 것 |
+|--------|------|-----------|
+| Slack | Bot Token + DM | Bot Token (`chat:write` 권한), 멤버 ID |
+| Discord | Webhook | 채널 Webhook URL |
+
+두 서비스를 동시에 설정하면 양쪽 모두로 알림이 전송됩니다.
+
 ## 사전 요구사항
 
 - Python 3.10+
 - [uv](https://docs.astral.sh/uv/) (패키지 매니저)
-- Slack Bot Token (`chat:write` 권한 필요)
+- Slack Bot Token 또는 Discord Webhook URL
 
 ## Slack Bot 설정
 
@@ -26,27 +35,34 @@ Claude Code의 [훅(Hooks)](https://docs.anthropic.com/en/docs/claude-code/hooks
 3. 워크스페이스에 앱 설치
 4. **Bot User OAuth Token** (`xoxb-...`) 복사
 
+## Discord Webhook 설정
+
+1. 알림을 받을 Discord 채널에서 **채널 편집(⚙️)** 클릭
+2. **연동** > **웹후크** > **새 웹후크** 클릭
+3. **웹후크 URL 복사** 클릭 (`https://discord.com/api/webhooks/...`)
+
 ## 설치 및 설정
 
 ```bash
 # 1. 설치
 uv tool install git+https://github.com/ahaljh/claude-code-notify
 
-# 2. 초기 설정 (Slack 토큰 입력 + Claude Code 훅 자동 등록)
+# 2. 초기 설정 (알림 서비스 선택 + Claude Code 훅 자동 등록)
 uvx claude-code-notify init
 ```
 
 > **참고**: `uv tool install` 후 PATH 설정 없이도 `uvx` 명령어로 바로 실행할 수 있습니다.
 
 `init` 명령어가 다음을 자동으로 처리합니다:
-- Slack Bot Token과 User ID 입력 안내
-- `~/.config/claude-code-notify/config.env`에 설정 저장
+- 알림 서비스 선택 (Slack / Discord / 둘 다)
+- 선택한 서비스의 인증 정보 입력 안내
+- `~/.config/claude-code-notify/config.env`에 설정 저장 (기존 설정은 키별로 병합)
 - `~/.claude/settings.json`에 훅 자동 등록
 - (선택) 테스트 알림 전송
 
 설정 완료 후 Claude Code를 재시작하면 알림이 동작합니다.
 
-> **참고**: `USER_ID`는 사용자 이름이 아닌 사용자 ID입니다. Slack 프로필 > 더보기(⋯) > 멤버 ID 복사에서 확인할 수 있습니다.
+> **참고**: Slack의 `USER_ID`는 사용자 이름이 아닌 사용자 ID입니다. Slack 프로필 > 더보기(⋯) > 멤버 ID 복사에서 확인할 수 있습니다.
 
 ## 수동 설정
 
@@ -57,10 +73,19 @@ uvx claude-code-notify init
 `~/.config/claude-code-notify/config.env` 파일 생성:
 
 ```env
+# Slack (두 키가 모두 있어야 활성화)
 SLACK_BOT_TOKEN=xoxb-your-bot-token
 USER_ID=U0XXXXXXXXX
+
+# Discord (키가 있으면 활성화)
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/123456789/abcdef...
+
 LOG_LEVEL=INFO
 ```
+
+> **활성화 규칙**: 설정 키가 존재하는 서비스만 활성화됩니다. Slack만 쓰려면 `DISCORD_WEBHOOK_URL`을 빼면 되고, Discord만 쓰려면 Slack 키 두 개를 빼면 됩니다.
+>
+> **기존 사용자**: 기존 Slack 전용 설정(`SLACK_BOT_TOKEN`/`USER_ID`)은 수정 없이 그대로 동작합니다. Discord를 추가하려면 `init`을 다시 실행하거나 `DISCORD_WEBHOOK_URL` 한 줄을 추가하면 됩니다.
 
 ### Claude Code 훅
 

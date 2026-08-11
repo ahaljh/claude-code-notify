@@ -1,7 +1,7 @@
 [project]
 name = "claude-code-notify"
-version = "0.1.0"
-description = "Claude Code 작업 완료 또는 입력 대기 시 Slack DM으로 알림을 보내는 유틸리티"
+version = "0.2.0"
+description = "Claude Code 작업 완료 또는 입력 대기 시 Slack/Discord로 알림을 보내는 유틸리티"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
